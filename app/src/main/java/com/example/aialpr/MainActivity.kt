@@ -53,10 +53,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.credentials.CredentialManager
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.GetCredentialResponse
-import androidx.credentials.exceptions.GetCredentialException
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.rememberAsyncImagePainter
 import com.example.aialpr.api.PlateRecognizerResponse
@@ -64,7 +60,6 @@ import com.example.aialpr.api.PlateRecognizerService
 import com.example.aialpr.db.AppDatabase
 import com.example.aialpr.db.RecognitionResult
 import com.example.aialpr.ui.theme.AIALPRTheme
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,10 +75,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             AIALPRTheme {
                 CameraScreen()
-                }
             }
         }
     }
+}
 
 
 private sealed class ScreenState {
@@ -169,26 +164,8 @@ fun CameraScreen() {
                 onTakeAnother = { screenState = ScreenState.Camera },
                 onSaveLocally = {
                     coroutineScope.launch {
-                        try {
-                            val credentialManager = CredentialManager.create(context)
-                            val googleIdOption = GetGoogleIdOption.Builder()
-                                .setFilterByAuthorizedAccounts(false)
-                                .setServerClientId("YOUR_SERVER_CLIENT_ID") // TODO: Replace with your actual server client ID
-                                .build()
-
-                            val request = GetCredentialRequest.Builder()
-                                .addCredentialOption(googleIdOption)
-                                .build()
-
-                            val result = credentialManager.getCredential(context, request)
-                            handleSignIn(result)
-
-                            // Save to local DB after "sign in"
-                            saveToDatabase(context, state)
-                            Toast.makeText(context, "Saved to Local Database", Toast.LENGTH_LONG).show()
-                        } catch (e: GetCredentialException) {
-                            Toast.makeText(context, "Auth failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
+                        saveToDatabase(context, state)
+                        Toast.makeText(context, "Saved to Local Database", Toast.LENGTH_LONG).show()
                     }
                 }
             )
@@ -204,10 +181,6 @@ fun CameraScreen() {
             }
         }
     }
-}
-
-private fun handleSignIn(result: GetCredentialResponse) {
-    // Process credential as needed (e.g. verify ID token)
 }
 
 private suspend fun saveToDatabase(context: android.content.Context, state: ScreenState.Result) {
@@ -254,7 +227,7 @@ private fun CameraPreview(
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
                         val preview = Preview.Builder().build().also {
-                            it.surfaceProvider = view.surfaceProvider
+                            it.setSurfaceProvider(view.surfaceProvider)
                         }
                         val resolutionSelector = ResolutionSelector.Builder()
                             .setResolutionStrategy(
