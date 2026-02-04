@@ -11,4 +11,7 @@ interface RecognitionDao {
 
     @Query("SELECT * FROM recognition_results ORDER BY id DESC")
     suspend fun getAll(): List<RecognitionResult>
+
+    @Query("SELECT * FROM recognition_results WHERE plates LIKE '%' || :plate || '%' ORDER BY id DESC")
+    suspend fun getHistoryForPlate(plate: String): List<RecognitionResult>
 }

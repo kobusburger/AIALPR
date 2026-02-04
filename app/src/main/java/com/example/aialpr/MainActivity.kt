@@ -35,6 +35,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -227,7 +228,7 @@ private fun CameraPreview(
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
                         val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(view.surfaceProvider)
+                            it.surfaceProvider = view.surfaceProvider
                         }
                         val resolutionSelector = ResolutionSelector.Builder()
                             .setResolutionStrategy(
@@ -295,6 +296,19 @@ private fun ResultScreen(
     onTakeAnother: () -> Unit,
     onSaveLocally: () -> Unit
 ) {
+    val context = LocalContext.current
+    var history by remember { mutableStateOf<List<RecognitionResult>>(emptyList()) }
+    val firstPlate = response.results?.firstOrNull()?.plate
+
+    LaunchedEffect(firstPlate) {
+        if (firstPlate != null) {
+            withContext(Dispatchers.IO) {
+                val db = AppDatabase.getDatabase(context)
+                history = db.recognitionDao().getHistoryForPlate(firstPlate)
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -328,6 +342,32 @@ private fun ResultScreen(
                 Text("Region: ${r.region?.code ?: "-"}", style = MaterialTheme.typography.bodySmall)
             }
         }
+
+        if (history.isNotEmpty()) {
+            Spacer(Modifier.height(24.dp))
+            Text("History for $firstPlate", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+
+            // Table Header
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Text("Timestamp", Modifier.weight(1.5f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Region", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Score", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            }
+            HorizontalDivider()
+
+            // History Rows
+            history.forEach { item ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    val displayTime = item.timestamp.replace("T", " ")
+                    Text(displayTime, Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
+                    Text(item.regions, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text(item.scores, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                }
+                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+            }
+        }
+
         Spacer(Modifier.height(24.dp))
         Row(
             Modifier.fillMaxWidth(),
