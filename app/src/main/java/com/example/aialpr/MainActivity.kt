@@ -1,6 +1,7 @@
 package com.example.aialpr
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -68,6 +70,8 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,6 +116,17 @@ fun CameraScreen() {
         hasCameraPermission = granted
         if (!granted) {
             Toast.makeText(context, "Camera permission is required", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        uri?.let {
+            coroutineScope.launch {
+                exportData(context, it)
+                Toast.makeText(context, "Data exported successfully", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -168,6 +183,10 @@ fun CameraScreen() {
                         saveToDatabase(context, state)
                         Toast.makeText(context, "Saved to Local Database", Toast.LENGTH_LONG).show()
                     }
+                },
+                onExport = {
+                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    exportLauncher.launch("AIALPR_Export_$timestamp.zip")
                 }
             )
             is ScreenState.Error -> Box(
@@ -184,32 +203,58 @@ fun CameraScreen() {
     }
 }
 
-private suspend fun saveToDatabase(context: android.content.Context, state: ScreenState.Result) {
+private suspend fun saveToDatabase(context: Context, state: ScreenState.Result) {
     withContext(Dispatchers.IO) {
-        val r = state.response.results.orEmpty()
-        val plates = r.joinToString("; ") { it.plate ?: "-" }
-        val regions = r.joinToString("; ") { it.region?.code ?: "-" }
-        val scores = r.joinToString("; ") { (it.score ?: 0.0).toString() }
+        val results = state.response.results.orEmpty()
         val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date())
         val photoBytes = state.photoFile.readBytes()
-
         val db = AppDatabase.getDatabase(context)
-        db.recognitionDao().insert(
-            RecognitionResult(
-                timestamp = timestamp,
-                plates = plates,
-                regions = regions,
-                scores = scores,
-                photoBytes = photoBytes
+
+        results.forEach { r ->
+            db.recognitionDao().insert(
+                RecognitionResult(
+                    timestamp = timestamp,
+                    plate = r.plate ?: "-",
+                    region = r.region?.code ?: "-",
+                    score = r.score ?: 0.0,
+                    photoBytes = photoBytes
+                )
             )
-        )
+        }
+    }
+}
+
+private suspend fun exportData(context: Context, uri: Uri) {
+    withContext(Dispatchers.IO) {
+        val db = AppDatabase.getDatabase(context)
+        val allResults = db.recognitionDao().getAll()
+        
+        context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+            ZipOutputStream(outputStream).use { zipOut ->
+                // Write CSV entry
+                val csvContent = StringBuilder("ID,Timestamp,Plate,Region,Score,PhotoFile\n")
+                allResults.forEach { res ->
+                    val photoFileName = "photo_${res.id}.jpg"
+                    csvContent.append("${res.id},${res.timestamp},${res.plate},${res.region},${res.score},$photoFileName\n")
+                    
+                    // Write Photo entry
+                    zipOut.putNextEntry(ZipEntry("photos/$photoFileName"))
+                    zipOut.write(res.photoBytes)
+                    zipOut.closeEntry()
+                }
+                
+                zipOut.putNextEntry(ZipEntry("data.csv"))
+                zipOut.write(csvContent.toString().toByteArray())
+                zipOut.closeEntry()
+            }
+        }
     }
 }
 
 @Composable
 private fun CameraPreview(
     modifier: Modifier,
-    context: android.content.Context,
+    context: Context,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     onPhotoTaken: (File, Uri) -> Unit
 ) {
@@ -294,17 +339,22 @@ private fun ResultScreen(
     photoUri: Uri,
     response: PlateRecognizerResponse,
     onTakeAnother: () -> Unit,
-    onSaveLocally: () -> Unit
+    onSaveLocally: () -> Unit,
+    onExport: () -> Unit
 ) {
     val context = LocalContext.current
-    var history by remember { mutableStateOf<List<RecognitionResult>>(emptyList()) }
-    val firstPlate = response.results?.firstOrNull()?.plate
+    var histories by remember { mutableStateOf<Map<String, List<RecognitionResult>>>(emptyMap()) }
+    val detectedPlates = response.results?.mapNotNull { it.plate } ?: emptyList()
 
-    LaunchedEffect(firstPlate) {
-        if (firstPlate != null) {
+    LaunchedEffect(detectedPlates) {
+        if (detectedPlates.isNotEmpty()) {
             withContext(Dispatchers.IO) {
                 val db = AppDatabase.getDatabase(context)
-                history = db.recognitionDao().getHistoryForPlate(firstPlate)
+                val map = mutableMapOf<String, List<RecognitionResult>>()
+                detectedPlates.distinct().forEach { plate ->
+                    map[plate] = db.recognitionDao().getHistoryForPlate(plate)
+                }
+                histories = map
             }
         }
     }
@@ -332,49 +382,49 @@ private fun ResultScreen(
         } else {
             Text("Plates found: ${results.size}", style = MaterialTheme.typography.titleMedium)
             results.forEach { r ->
+                val plateName = r.plate ?: "-"
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween)
                 {
-                    Text("Plate: ${r.plate ?: "-"}", style = MaterialTheme.typography.bodyMedium)
+                    Text("Plate: $plateName", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                     Text("Score: ${String.format(Locale.US, "%.2f", r.score ?: 0.0)}", style = MaterialTheme.typography.bodySmall)
                 }
                 Text("Region: ${r.region?.code ?: "-"}", style = MaterialTheme.typography.bodySmall)
-            }
-        }
-
-        if (history.isNotEmpty()) {
-            Spacer(Modifier.height(24.dp))
-            Text("History for $firstPlate", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-
-            // Table Header
-            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Timestamp", Modifier.weight(1.5f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Region", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Score", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            }
-            HorizontalDivider()
-
-            // History Rows
-            history.forEach { item ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    val displayTime = item.timestamp.replace("T", " ")
-                    Text(displayTime, Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
-                    Text(item.regions, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    Text(item.scores, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                
+                val history = histories[plateName] ?: emptyList()
+                if (history.isNotEmpty()) {
+                    Text("History for $plateName:", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
+                    history.take(3).forEach { item ->
+                        Text("  • ${item.timestamp.replace("T", " ")} (${item.region})", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (history.size > 3) {
+                        Text("  ... and ${history.size - 3} more", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             }
         }
 
-        Spacer(Modifier.height(24.dp))
-        Row(
+        Spacer(Modifier.height(16.dp))
+        Column(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Button(onClick = onTakeAnother, modifier = Modifier.weight(1f)) { Text("Take another") }
-            Button(onClick = onSaveLocally, modifier = Modifier.weight(1f)) { Text("Save Locally") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onTakeAnother, modifier = Modifier.weight(1f)) { Text("Take another") }
+                Button(onClick = onSaveLocally, modifier = Modifier.weight(1f)) { Text("Save Locally") }
+            }
+            Button(
+                onClick = onExport,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) {
+                Text("Export Database & Photos (ZIP)")
+            }
         }
     }
 }
