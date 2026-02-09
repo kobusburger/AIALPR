@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Parcelable
+import android.provider.OpenableColumns
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -41,6 +42,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,8 +60,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,13 +78,16 @@ import coil.compose.rememberAsyncImagePainter
 import com.example.aialpr.api.PlateRecognizerResponse
 import com.example.aialpr.api.PlateRecognizerService
 import com.example.aialpr.db.AppDatabase
+import com.example.aialpr.db.PlateInfo
 import com.example.aialpr.db.RecognitionResult
 import com.example.aialpr.ui.theme.AIALPRTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -464,14 +469,43 @@ private fun HistoryScreen(
     onExport: () -> Unit
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var allResults by remember { mutableStateOf<List<RecognitionResult>>(emptyList()) }
     var filterText by rememberSaveable { mutableStateOf("") }
     var selectedResult by rememberSaveable { mutableStateOf<RecognitionResult?>(null) }
+    var selectedPlateInfo by remember { mutableStateOf<PlateInfo?>(null) }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let {
+            val fileName = getFileName(context, it)
+            if (fileName?.lowercase()?.endsWith(".csv") == true) {
+                coroutineScope.launch {
+                    importCsv(context, it)
+                    Toast.makeText(context, "CSV imported successfully", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                Toast.makeText(context, "Please select a .csv file", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val db = AppDatabase.getDatabase(context)
             allResults = db.recognitionDao().getAll()
+        }
+    }
+
+    LaunchedEffect(selectedResult) {
+        selectedResult?.let { res ->
+            withContext(Dispatchers.IO) {
+                val db = AppDatabase.getDatabase(context)
+                selectedPlateInfo = db.plateInfoDao().getInfoForPlate(res.plate)
+            }
+        } ?: run {
+            selectedPlateInfo = null
         }
     }
 
@@ -496,6 +530,11 @@ private fun HistoryScreen(
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.weight(1f).padding(start = 8.dp)
             )
+            IconButton(onClick = { 
+                importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values")) 
+            }) {
+                Icon(Icons.Default.FileUpload, contentDescription = "Import CSV")
+            }
             IconButton(onClick = onExport) {
                 Icon(Icons.Default.FileDownload, contentDescription = "Export")
             }
@@ -570,7 +609,8 @@ private fun HistoryScreen(
                 Column(
                     modifier = Modifier
                         .padding(16.dp)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
@@ -593,6 +633,21 @@ private fun HistoryScreen(
                             .background(Color.Black),
                         contentScale = ContentScale.Fit
                     )
+
+                    selectedPlateInfo?.let { info ->
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Additional Info:",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.align(Alignment.Start)
+                        )
+                        Text(
+                            text = info.extraData,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.align(Alignment.Start).padding(top = 4.dp)
+                        )
+                    }
                     
                     Spacer(modifier = Modifier.height(16.dp))
                     
@@ -604,6 +659,69 @@ private fun HistoryScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+private fun getFileName(context: Context, uri: Uri): String? {
+    var result: String? = null
+    if (uri.scheme == "content") {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        try {
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) result = cursor.getString(index)
+            }
+        } finally {
+            cursor?.close()
+        }
+    }
+    if (result == null) {
+        result = uri.path
+        val cut = result?.lastIndexOf('/') ?: -1
+        if (cut != -1) {
+            result = result?.substring(cut + 1)
+        }
+    }
+    return result
+}
+
+private suspend fun importCsv(context: Context, uri: Uri) {
+    withContext(Dispatchers.IO) {
+        val db = AppDatabase.getDatabase(context)
+        val plateInfos = mutableListOf<PlateInfo>()
+        
+        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+            BufferedReader(InputStreamReader(inputStream)).use { reader ->
+                val header = reader.readLine() // Read header
+                if (header != null) {
+                    val columns = header.split(",")
+                    val plateIndex = columns.indexOfFirst { it.contains("plate", ignoreCase = true) }
+                    
+                    if (plateIndex != -1) {
+                        var line = reader.readLine()
+                        while (line != null) {
+                            val values = line.split(",")
+                            if (values.size > plateIndex) {
+                                val plate = values[plateIndex].trim()
+                                val extraBuilder = StringBuilder()
+                                for (i in values.indices) {
+                                    if (i != plateIndex && i < columns.size) {
+                                        if (extraBuilder.isNotEmpty()) extraBuilder.append("\n")
+                                        extraBuilder.append("${columns[i].trim()}: ${values[i].trim()}")
+                                    }
+                                }
+                                plateInfos.add(PlateInfo(plate, extraBuilder.toString()))
+                            }
+                            line = reader.readLine()
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (plateInfos.isNotEmpty()) {
+            db.plateInfoDao().replaceAll(plateInfos)
         }
     }
 }
