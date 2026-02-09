@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Parcelable
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -22,6 +23,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,10 +39,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -49,12 +51,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.rememberAsyncImagePainter
@@ -76,6 +81,7 @@ import com.example.aialpr.ui.theme.AIALPRTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.parcelize.Parcelize
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -95,17 +101,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-
-private sealed class ScreenState {
-    data object Camera : ScreenState()
-    data object Loading : ScreenState()
-    data class Result(
+@Parcelize
+private sealed class ScreenState : Parcelable {
+    @Parcelize data object Camera : ScreenState()
+    @Parcelize data object Loading : ScreenState()
+    @Parcelize data class Result(
         val photoFile: File,
         val photoUri: Uri,
         val response: PlateRecognizerResponse
     ) : ScreenState()
-    data class Error(val message: String) : ScreenState()
-    data object History : ScreenState()
+    @Parcelize data class Error(val message: String) : ScreenState()
+    @Parcelize data object History : ScreenState()
 }
 
 @Composable
@@ -119,7 +125,7 @@ fun CameraScreen() {
                     PackageManager.PERMISSION_GRANTED
         )
     }
-    var screenState: ScreenState by remember { mutableStateOf(ScreenState.Camera) }
+    var screenState by rememberSaveable { mutableStateOf<ScreenState>(ScreenState.Camera) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -156,20 +162,18 @@ fun CameraScreen() {
         when (val state = screenState) {
             is ScreenState.Camera -> CameraPreview(
                 modifier = Modifier.padding(innerPadding),
-                context = context,
                 lifecycleOwner = lifecycleOwner,
                 onPhotoTaken = { file, uri ->
                     screenState = ScreenState.Loading
-                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
                     PlateRecognizerService.recognizePlate(
                         imageFile = file,
                         onSuccess = { response ->
-                            handler.post {
+                            coroutineScope.launch {
                                 screenState = ScreenState.Result(photoFile = file, photoUri = uri, response = response)
                             }
                         },
                         onError = { msg ->
-                            handler.post { screenState = ScreenState.Error(msg) }
+                            coroutineScope.launch { screenState = ScreenState.Error(msg) }
                         }
                     )
                 },
@@ -196,17 +200,12 @@ fun CameraScreen() {
                     modifier = Modifier.padding(innerPadding),
                     photoUri = state.photoUri,
                     response = state.response,
-                    onTakeAnother = { screenState = ScreenState.Camera },
-                    onExport = {
-                        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                        exportLauncher.launch("AIALPR_Export_$timestamp.zip")
-                    }
+                    onTakeAnother = { screenState = ScreenState.Camera }
                 )
             }
             is ScreenState.Error -> Box(
                 Modifier.fillMaxSize().padding(innerPadding),
-                contentAlignment = Alignment.Center
-            ) {
+                contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Error: ${state.message}", style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(16.dp))
@@ -215,7 +214,11 @@ fun CameraScreen() {
             }
             is ScreenState.History -> HistoryScreen(
                 modifier = Modifier.padding(innerPadding),
-                onBack = { screenState = ScreenState.Camera }
+                onBack = { screenState = ScreenState.Camera },
+                onExport = {
+                    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    exportLauncher.launch("AIALPR_Export_$timestamp.zip")
+                }
             )
         }
     }
@@ -250,12 +253,11 @@ private suspend fun exportData(context: Context, uri: Uri) {
         
         context.contentResolver.openOutputStream(uri)?.use { outputStream ->
             ZipOutputStream(outputStream).use { zipOut ->
-                // Write CSV entry
                 val csvContent = StringBuilder("ID,Timestamp,Plate,Region,Score,PhotoFile\n")
                 allResults.forEach { res ->
                     val date = try {
                         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).parse(res.timestamp)
-                    } catch (e: Exception) { null }
+                    } catch (_: Exception) { null }
                     
                     val baseName = if (date != null) SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(date) else "photo_${res.id}"
                     var photoFileName = "$baseName.jpg"
@@ -268,7 +270,6 @@ private suspend fun exportData(context: Context, uri: Uri) {
 
                     csvContent.append("${res.id},${res.timestamp},${res.plate},${res.region},${res.score},$photoFileName\n")
                     
-                    // Write Photo entry
                     zipOut.putNextEntry(ZipEntry("photos/$photoFileName"))
                     zipOut.write(res.photoBytes)
                     zipOut.closeEntry()
@@ -285,18 +286,21 @@ private suspend fun exportData(context: Context, uri: Uri) {
 @Composable
 private fun CameraPreview(
     modifier: Modifier,
-    context: Context,
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     onPhotoTaken: (File, Uri) -> Unit,
     onOpenHistory: () -> Unit
 ) {
+    val context = LocalContext.current
     Box(modifier = modifier.fillMaxSize()) {
-        val previewView = remember { PreviewView(context) }
         var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
         var cameraBound by remember { mutableStateOf(false) }
 
         AndroidView(
-            factory = { previewView },
+            factory = { ctx ->
+                PreviewView(ctx).apply {
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                }
+            },
             modifier = Modifier.fillMaxSize(),
             update = { view ->
                 if (!cameraBound) {
@@ -382,8 +386,7 @@ private fun ResultScreen(
     modifier: Modifier,
     photoUri: Uri,
     response: PlateRecognizerResponse,
-    onTakeAnother: () -> Unit,
-    onExport: () -> Unit
+    onTakeAnother: () -> Unit
 ) {
     val context = LocalContext.current
     var histories by remember { mutableStateOf<Map<String, List<RecognitionResult>>>(emptyMap()) }
@@ -450,33 +453,20 @@ private fun ResultScreen(
         }
 
         Spacer(Modifier.height(16.dp))
-        Column(
-            Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(onClick = onTakeAnother, modifier = Modifier.fillMaxWidth()) { Text("Take another") }
-            Button(
-                onClick = onExport,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            ) {
-                Text("Export Database & Photos (ZIP)")
-            }
-        }
+        Button(onClick = onTakeAnother, modifier = Modifier.fillMaxWidth()) { Text("Take another") }
     }
 }
 
 @Composable
 private fun HistoryScreen(
     modifier: Modifier,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onExport: () -> Unit
 ) {
     val context = LocalContext.current
     var allResults by remember { mutableStateOf<List<RecognitionResult>>(emptyList()) }
-    var filterText by remember { mutableStateOf("") }
+    var filterText by rememberSaveable { mutableStateOf("") }
+    var selectedResult by rememberSaveable { mutableStateOf<RecognitionResult?>(null) }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -499,13 +489,16 @@ private fun HistoryScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Text(
                 "Recognition History",
                 style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.padding(start = 8.dp)
+                modifier = Modifier.weight(1f).padding(start = 8.dp)
             )
+            IconButton(onClick = onExport) {
+                Icon(Icons.Default.FileDownload, contentDescription = "Export")
+            }
         }
 
         OutlinedTextField(
@@ -524,7 +517,6 @@ private fun HistoryScreen(
             }
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                // Table Header
                 item {
                     Row(
                         modifier = Modifier
@@ -541,7 +533,7 @@ private fun HistoryScreen(
                 }
 
                 items(filteredResults) { res ->
-                    Column {
+                    Column(modifier = Modifier.clickable { selectedResult = res }) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -563,6 +555,52 @@ private fun HistoryScreen(
                             )
                         }
                         HorizontalDivider(thickness = 0.5.dp, color = Color.LightGray)
+                    }
+                }
+            }
+        }
+    }
+
+    selectedResult?.let { res ->
+        Dialog(onDismissRequest = { selectedResult = null }) {
+            Surface(
+                shape = MaterialTheme.shapes.large,
+                tonalElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(16.dp)
+                        .fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Plate: ${res.plate}",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = res.timestamp.replace("T", " "),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    
+                    Image(
+                        painter = rememberAsyncImagePainter(res.photoBytes),
+                        contentDescription = "Recognition Photo",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(300.dp)
+                            .background(Color.Black),
+                        contentScale = ContentScale.Fit
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Button(
+                        onClick = { selectedResult = null },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Close")
                     }
                 }
             }

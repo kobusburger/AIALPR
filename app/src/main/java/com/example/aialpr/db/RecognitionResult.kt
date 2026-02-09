@@ -1,8 +1,11 @@
 package com.example.aialpr.db
 
+import android.os.Parcelable
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import kotlinx.parcelize.Parcelize
 
+@Parcelize
 @Entity(tableName = "recognition_results")
 data class RecognitionResult(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -11,7 +14,7 @@ data class RecognitionResult(
     val region: String,
     val score: Double,
     val photoBytes: ByteArray
-) {
+) : Parcelable {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
