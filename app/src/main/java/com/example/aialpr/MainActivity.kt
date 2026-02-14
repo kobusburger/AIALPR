@@ -394,18 +394,20 @@ private fun ResultScreen(
     onTakeAnother: () -> Unit
 ) {
     val context = LocalContext.current
-    var histories by remember { mutableStateOf<Map<String, List<RecognitionResult>>>(emptyMap()) }
+    var plateInfos by remember { mutableStateOf<Map<String, PlateInfo>>(emptyMap()) }
     val detectedPlates = response.results?.mapNotNull { it.plate } ?: emptyList()
 
     LaunchedEffect(detectedPlates) {
         if (detectedPlates.isNotEmpty()) {
             withContext(Dispatchers.IO) {
                 val db = AppDatabase.getDatabase(context)
-                val map = mutableMapOf<String, List<RecognitionResult>>()
+                val map = mutableMapOf<String, PlateInfo>()
                 detectedPlates.distinct().forEach { plate ->
-                    map[plate] = db.recognitionDao().getHistoryForPlate(plate)
+                    db.plateInfoDao().getInfoForPlate(plate)?.let {
+                        map[plate] = it
+                    }
                 }
-                histories = map
+                plateInfos = map
             }
         }
     }
@@ -443,15 +445,19 @@ private fun ResultScreen(
                 }
                 Text("Region: ${r.region?.code ?: "-"}", style = MaterialTheme.typography.bodySmall)
                 
-                val history = histories[plateName] ?: emptyList()
-                if (history.isNotEmpty()) {
-                    Text("History for $plateName:", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 4.dp))
-                    history.take(3).forEach { item ->
-                        Text("  • ${item.timestamp.replace("T", " ")} (${item.region})", style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (history.size > 3) {
-                        Text("  ... and ${history.size - 3} more", style = MaterialTheme.typography.bodySmall)
-                    }
+                plateInfos[plateName]?.let { info ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Additional Info:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = info.extraData,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
                 }
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             }
